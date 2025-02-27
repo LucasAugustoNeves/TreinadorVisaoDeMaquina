@@ -41,12 +41,18 @@ except Exception as e:
     print(f"Erro ao carregar modelo YOLO: {e}")
     sys.exit(1)
 
-# Data augmentation ajustado (sem flips para evitar inversões)
+# Data augmentation ajustado (sem rotações, flips ou escalas para evitar inconsistências)
 transform = A.Compose([
-    A.RandomRotate90(p=0.5),  # Mantém apenas rotações de 90 graus
-    A.RandomBrightnessContrast(p=0.5),  # Ajuste de brilho e contraste
-    A.Affine(translate_percent=0.1, scale=0.1, rotate=15, p=0.5),  # Deslocamento, escala e rotação
+    A.RandomBrightnessContrast(p=0.3, brightness_limit=0.1, contrast_limit=0.1),  # Ajuste leve de brilho e contraste
 ])
+
+def is_valid_frame(frame):
+    """Verifica se o frame é válido (não preto, não corrompido, com brilho mínimo)."""
+    if frame is None or frame.size == 0:
+        return False
+    # Verifica se a média dos pixels está acima de um limiar mais alto para evitar frames pretos
+    mean_brightness = np.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    return mean_brightness > 50  # Aumentado para 50 para maior rigor (ajustável)
 
 class TeachableMachineApp:
     def __init__(self, root):
@@ -56,6 +62,11 @@ class TeachableMachineApp:
 
         self.classes = []
         self.webcam = cv2.VideoCapture(0)
+        # Ajusta as configurações iniciais da webcam para garantir frames consistentes
+        self.webcam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.webcam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.webcam.set(cv2.CAP_PROP_BRIGHTNESS, 100)  # Ajuste de brilho inicial
+        self.webcam.set(cv2.CAP_PROP_EXPOSURE, -4)     # Ajuste de exposição inicial
         if not self.webcam.isOpened():
             messagebox.showerror("Erro", "Não foi possível inicializar a webcam!")
             self.root.destroy()
@@ -175,11 +186,12 @@ class TeachableMachineApp:
                 return
 
             ret, frame = self.webcam.read()
-            if not ret or frame is None or frame.size == 0:  # Verifica frames inválidos (pretos ou corrompidos)
+            if not ret or frame is None or frame.size == 0 or not is_valid_frame(frame):  # Verifica frames inválidos
                 self.root.after(50, self.update_class_previews)
                 return
 
-            frame = cv2.resize(frame, (160, 120))
+            # Garante que o frame seja redimensionado corretamente para evitar tamanhos inconsistentes
+            frame = cv2.resize(frame, (160, 120), interpolation=cv2.INTER_AREA)
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img_pil = Image.fromarray(frame_rgb)
             img_tk = ImageTk.PhotoImage(image=img_pil)
@@ -236,27 +248,29 @@ class TeachableMachineApp:
         contador_fotos = len(os.listdir(class_pasta))
         while self.captura_continua_ativa.get(class_name, False):
             ret, frame = self.webcam.read()
-            if not ret or frame is None or frame.size == 0:  # Verifica frames inválidos
-                time.sleep(0.5)  # Aumenta o intervalo para maior estabilidade
+            if not ret or frame is None or frame.size == 0 or not is_valid_frame(frame):  # Verifica frames inválidos
+                time.sleep(0.1)  # Mantém a velocidade de captura
                 continue
-            frame = cv2.resize(frame, tamanho_img)
-            # Remove flips para evitar inversões, mantendo apenas ajustes básicos
-            augmented = transform(image=frame)["image"]
+            # Garante que o frame seja redimensionado corretamente para evitar tamanhos inconsistentes
+            frame = cv2.resize(frame, tamanho_img, interpolation=cv2.INTER_AREA)
+            # Remove todas as transformações que possam causar rotações ou escalas inconsistentes
+            augmented = frame  # Sem transformações para evitar rotações ou alterações de tamanho
             caminho_foto = os.path.join(class_pasta, f"{class_name}_{contador_fotos}.jpg")
             cv2.imwrite(caminho_foto, augmented)
             contador_fotos += 1
             self.update_thumbnails(class_name)
-            time.sleep(0.5)  # Aumenta o intervalo para maior estabilidade
+            time.sleep(0.1)  # Mantém a velocidade, mas com verificações robustas
 
     def upload_image(self, class_name):
         file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.png *.jpg *.jpeg")])
         if file_path:
             class_pasta = os.path.join(DATA_DIR, class_name)
             img = cv2.imread(file_path)
-            if img is not None:
-                img = cv2.resize(img, tamanho_img)
-                # Remove flips para evitar inversões, mantendo apenas ajustes básicos
-                augmented = transform(image=img)["image"]
+            if img is not None and is_valid_frame(img):  # Verifica se a imagem é válida
+                # Garante que a imagem seja redimensionada para o tamanho padrão
+                img = cv2.resize(img, tamanho_img, interpolation=cv2.INTER_AREA)
+                # Remove todas as transformações que possam causar rotações ou escalas inconsistentes
+                augmented = img  # Sem transformações para evitar rotações ou alterações de tamanho
                 contador_fotos = len(os.listdir(class_pasta))
                 novo_nome = os.path.join(class_pasta, f"{class_name}_{contador_fotos}.jpg")
                 cv2.imwrite(novo_nome, augmented)
@@ -280,8 +294,8 @@ class TeachableMachineApp:
             for foto in os.listdir(pasta_categoria):
                 caminho = os.path.join(pasta_categoria, foto)
                 img = cv2.imread(caminho)
-                if img is not None:
-                    img = cv2.resize(img, tamanho_img)
+                if img is not None and is_valid_frame(img):  # Verifica se a imagem é válida
+                    img = cv2.resize(img, tamanho_img, interpolation=cv2.INTER_AREA)
                     imagens.append(img)
                     rotulos.append(categorias.index(categoria))
 
@@ -335,16 +349,16 @@ class TeachableMachineApp:
         if not self.preview_active:
             return None, [], {}
         ret, frame = self.webcam.read()
-        if not ret or frame is None or frame.size == 0:
+        if not ret or frame is None or frame.size == 0 or not is_valid_frame(frame):
             return None, [], {}
 
-        frame_red = cv2.resize(frame, (96, 72))
+        frame_red = cv2.resize(frame, (96, 72), interpolation=cv2.INTER_AREA)  # Garante redimensionamento consistente
         resultados = model_yolo.predict(frame_red, classes=[0], verbose=False)
         objetos = []
         confidences = {c["name"]: 0.0 for c in self.classes}
 
         if self.modelo:
-            img = cv2.resize(frame, tamanho_img)
+            img = cv2.resize(frame, tamanho_img, interpolation=cv2.INTER_AREA)  # Garante redimensionamento consistente
             img = np.expand_dims(img, axis=0) / 255.0
             try:
                 previsao = self.modelo.predict(img, verbose=0)[0]
